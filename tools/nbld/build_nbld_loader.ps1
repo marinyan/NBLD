@@ -12,7 +12,9 @@ param(
     [string]$OutputStem,
     [Parameter(Mandatory)]
     [string]$OutputDirectory,
-    [string]$AssemblerPath = "D:\data\PC-8001mkII\z80-development-codex-kit-2026-07-30\toolchain\z80asm\z80asm.exe"
+    [ValidateSet('sjasmplus', 'z80asm')]
+    [string]$Assembler = 'sjasmplus',
+    [string]$AssemblerPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,10 +30,17 @@ $loaderStackTop = 0xF400
 $scriptDirectory = $PSScriptRoot
 $stage2Source = Join-Path $scriptDirectory "nbld_stage2.asm"
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
-$AssemblerPath = [System.IO.Path]::GetFullPath($AssemblerPath)
-
-if (-not (Test-Path -LiteralPath $AssemblerPath -PathType Leaf)) {
-    throw "z80asm.exe not found: $AssemblerPath"
+if ([string]::IsNullOrWhiteSpace($AssemblerPath)) {
+    $AssemblerPath = $Assembler
+}
+if (Test-Path -LiteralPath $AssemblerPath -PathType Leaf) {
+    $AssemblerPath = (Resolve-Path -LiteralPath $AssemblerPath).ProviderPath
+} else {
+    $assemblerCommand = Get-Command -Name $AssemblerPath -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $assemblerCommand) {
+        throw "Assembler not found: $AssemblerPath. Add $Assembler to PATH, or pass -AssemblerPath with its executable path."
+    }
+    $AssemblerPath = $assemblerCommand.Source
 }
 if (-not (Test-Path -LiteralPath $stage2Source -PathType Leaf)) {
     throw "Common NBLD stage-2 source not found: $stage2Source"
@@ -321,7 +330,13 @@ $encodedText=[Convert]::ToBase64String($packageBytes)
 $relocatorBinaryPath=Join-Path $OutputDirectory "$OutputStem-basic-relocator.bin"
 $relocatorListingPath=Join-Path $OutputDirectory "$OutputStem-basic-relocator.lst"
 $relocatorSymbolsPath=Join-Path $OutputDirectory "$OutputStem-basic-relocator.sym"
-& $AssemblerPath $stage2Source -o $relocatorBinaryPath -l $relocatorListingPath --sym $relocatorSymbolsPath --cpu z80 | Out-Host
+if ($Assembler -eq 'sjasmplus') {
+    # SjASMPlus recommends forward slashes in source paths, also on Windows.
+    $assemblerSource = $stage2Source.Replace('\', '/')
+    & $AssemblerPath "--raw=$relocatorBinaryPath" "--lst=$relocatorListingPath" "--sym=$relocatorSymbolsPath" $assemblerSource | Out-Host
+} else {
+    & $AssemblerPath $stage2Source -o $relocatorBinaryPath -l $relocatorListingPath --sym $relocatorSymbolsPath --cpu z80 | Out-Host
+}
 if ($LASTEXITCODE-ne 0) { throw "Common NBLD stage-2 assembly failed." }
 [byte[]]$relocatorBinary=[System.IO.File]::ReadAllBytes($relocatorBinaryPath)
 if (($relocatorAddress+$relocatorBinary.Length)-gt $loaderStackTop) {

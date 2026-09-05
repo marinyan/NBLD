@@ -12,9 +12,16 @@ Base64 化した NBLD v3 パッケージを復元し、LZSS12 圧縮された各
 
 ## ビルド
 
-PowerShell と、元プロジェクトで使う `z80asm.exe` が必要。
-アセンブラは `-o`、`-l`、`--sym`、`--cpu z80` に対応するものを使う。
-`-AssemblerPath` は利用環境に合わせて明示する（スクリプトの既定値は取込元の環境）。
+PowerShell と、SjASMPlus または従来の `z80asm` が必要。
+
+### SjASMPlus（既定）
+
+[SjASMPlus](https://github.com/z00m128/sjasmplus) を使用する。
+動作確認版は [1.24.0](https://github.com/z00m128/sjasmplus/releases/tag/v1.24.0)。
+Windows では公式リリースの `sjasmplus-1.24.0.win.zip` を展開し、
+`sjasmplus.exe` を `-AssemblerPath` で指定する。
+PATH に登録してある場合は `-AssemblerPath` を省略できる。
+アセンブラ本体はこのリポジトリに同梱しない。
 
 プロジェクトのバイナリを用意し、このリポジトリのルートから実行する。
 
@@ -27,7 +34,7 @@ $segments = @(
     }
 )
 & ./tools/nbld/build_nbld_loader.ps1 `
-    -AssemblerPath 'C:\path\to\z80asm.exe' `
+    -AssemblerPath 'C:\path\to\sjasmplus.exe' `
     -PayloadName 'MYPROGRAM' `
     -EntryAddress 0x8000 `
     -Segments $segments `
@@ -44,6 +51,47 @@ CSAVE 名は全作品で `NBLD80`。生成した `*-basic.t88` または `*-basi
 ビルド時に圧縮・展開の往復一致、前向き展開による未読入力の上書き、
 パッケージと共通第2段の重なり、BASIC の作業領域を検査する。
 搭載 RAM・バンク構成と展開番地は対象機種に合わせて設定する。
+
+第2段だけをアセンブルする場合は次のとおり。
+
+```powershell
+New-Item -ItemType Directory -Force ./build | Out-Null
+sjasmplus --raw=build/nbld_stage2.bin tools/nbld/nbld_stage2.asm
+```
+
+SjASMPlus 1.24.0 で生成した第2段は631バイトで、切替前の出力とバイト単位で一致する。
+SHA-256: `4d0b5d39206d29b23e2a4a419626cac2fbc84b18b54f88c4abe602e66af4863b`。
+`ORG F100H` は実行番地であり、生バイナリの先頭に F100H バイトのパディングは付かない。
+
+### 従来の z80asm
+
+従来使用している `z80asm.exe` も `-Assembler z80asm` で選択できる。
+上記と同じ `$segments` を用意し、次のように実行する。
+
+```powershell
+& ./tools/nbld/build_nbld_loader.ps1 `
+    -Assembler z80asm `
+    -AssemblerPath 'C:\path\to\z80asm.exe' `
+    -PayloadName 'MYPROGRAM' `
+    -EntryAddress 0x8000 `
+    -Segments $segments `
+    -OutputStem 'myprogram' `
+    -OutputDirectory ./build
+```
+
+PATH に登録してある場合は `-AssemblerPath` を省略できる。
+このモードは `source.asm -o output.bin -l listing.lst --sym symbols.sym --cpu z80`
+という引数を受け付ける従来版向け。同名で配布されている別の `z80asm` との互換性は保証しない。
+実行ファイル名からの自動判別は行わないので、従来版では `-Assembler z80asm` も指定する。
+
+第2段だけをアセンブルする場合は次のとおり。
+
+```powershell
+New-Item -ItemType Directory -Force ./build | Out-Null
+& 'C:\path\to\z80asm.exe' tools/nbld/nbld_stage2.asm `
+    -o build/nbld_stage2.bin -l build/nbld_stage2.lst `
+    --sym build/nbld_stage2.sym --cpu z80
+```
 
 ## 共通コードの方針
 
