@@ -1,9 +1,17 @@
-param([string]$Builder,[string]$ConnectionFile,[string]$AssemblerPath)
+param(
+    [string]$Builder,
+    [string]$ConnectionFile,
+    [string]$AssemblerPath,
+    [string]$M88V=(Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'M88V')
+)
 $ErrorActionPreference='Stop'
 $out=Join-Path (Split-Path $PSScriptRoot -Parent) 'build/finalizer'
 New-Item -ItemType Directory -Force $out|Out-Null
-$ctl='C:\Users\dende\Documents\ChatGPT\M88V\scripts\m88ctl.ps1'
-$typer='C:\Users\dende\Documents\ChatGPT\M88V\scripts\type_nbasic.ps1'
+$ctl=Join-Path $M88V 'scripts/m88ctl.ps1'
+$typer=Join-Path $M88V 'scripts/type_nbasic.ps1'
+foreach($script in @($ctl,$typer)) {
+    if(!(Test-Path -LiteralPath $script -PathType Leaf)){throw "M88V helper not found: $script. Specify -M88V with the emulator directory."}
+}
 $main=Join-Path $out 'main.bin';[IO.File]::WriteAllBytes($main,[byte[]]@(0xF3,0xC3,1,0x90))
 $cases=@(@{Name='whole-top';Ranges=,@(0xF800,2048);Entry=0xF800},@{Name='stack-byte';Ranges=,@(0xFAFF,1);Entry=0x9000},@{Name='cross-start';Ranges=,@(0xF7F0,1040);Entry=0x9000},@{Name='two-tails';Ranges=@(@(0xF800,128),@(0xFA00,128));Entry=0xFA00})
 $reports=@()

@@ -1,9 +1,15 @@
-param([Parameter(Mandatory)][string]$ConnectionFile,[string]$M88V='C:\Users\dende\Documents\ChatGPT\M88V')
+param(
+    [Parameter(Mandatory)][string]$ConnectionFile,
+    [string]$M88V=(Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'M88V')
+)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $dir=Join-Path $root 'build/capacity'
 $ctl=Join-Path $M88V 'scripts/m88ctl.ps1'
 $typer=Join-Path $M88V 'scripts/type_nbasic.ps1'
+foreach($script in @($ctl,$typer)) {
+    if(!(Test-Path -LiteralPath $script -PathType Leaf)){throw "M88V helper not found: $script. Specify -M88V with the emulator directory."}
+}
 & $ctl reset -ConnectionFile $ConnectionFile | Out-Null
 & $ctl run -ConnectionFile $ConnectionFile -Frames 180 | Out-Null
 & $ctl tape -ConnectionFile $ConnectionFile -Tape (Join-Path $dir 'capacity-basic.t88') | Out-Null

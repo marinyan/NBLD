@@ -37,9 +37,22 @@ C800Hより低く始まる大きな対象セグメントはF800Hで分割する�
 
 一時領域は各例で8000Hから。ローダーの残骸ではなく、指定されたデータと全バイト一致した。
 オプションなしの上書き、未対応メモリ設定、空き不足、配置先重複の4例は拒否。
-新オプションなしではRogue、Defender80の3構成、SKYKID80、StarWars80の
+新オプションなしでは検証ケースA・B（3構成）・C・Dの
 パッケージ・BASIC・T88が容量拡張版と完全一致する。
 
 再実行は tests/finalizer-guards.ps1 と tests/finalizer-boot.ps1 に
--Builder、-AssemblerPath、後者にはさらに -ConnectionFile を指定する。
+-Builder、-AssemblerPath、後者にはさらに -ConnectionFile と必要に応じて -M88V を指定する。
+検証ケース名は[容量拡張の検証記録](capacity-2026-09-09.md)と共通。
 M88Vは機能検査にのみ使用し、速度評価は行っていない。
+
+```powershell
+./tests/finalizer-boot.ps1 `
+    -Builder ./tools/nbld/build_nbld_loader.ps1 `
+    -AssemblerPath 'C:\path\to\sjasmplus.exe' `
+    -ConnectionFile 'C:\path\to\connection.json' `
+    -M88V 'C:\path\to\M88V'
+```
+
+`-M88V` は `scripts/m88ctl.ps1` と `scripts/type_nbasic.ps1` を含むディレクトリ。
+省略時は、このリポジトリと同じ親ディレクトリにある `M88V` を使う。
+起動テストは各ケースでエミュレーターをリセットする。
