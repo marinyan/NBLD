@@ -1,16 +1,16 @@
 ; NBLD v3 common stage-2 loader for the PC-8001 family.
 ;
 ; The tokenized N-BASIC first stage is identical for every title. It copies
-; this routine to F100H, then starts it through a tiny F000H bootstrap. This
-; routine decodes the Base64 NBLD package from REM lines into C500H, validates
+; this routine to F800H, then starts it through a tiny F000H bootstrap. This
+; routine decodes the Base64 NBLD package from REM lines into C800H, validates
 ; its self-description, expands every segment, restores the ordinary N80 ROM
 ; mapping, and jumps to the package entry address.
 
-        ORG     0F100H
+        ORG     0F800H
 
 PORT_MEMORY_CONTROL EQU 31H
 ROM_VISIBLE         EQU 00H
-STAGING_ADDRESS     EQU 0C500H
+STAGING_ADDRESS     EQU 0C800H
 PACKAGE_MAGIC       EQU STAGING_ADDRESS+0
 PACKAGE_VERSION     EQU STAGING_ADDRESS+4
 PACKAGE_HEADER_SIZE EQU STAGING_ADDRESS+5
@@ -21,7 +21,7 @@ SEGMENT_LIST        EQU STAGING_ADDRESS+32
 NBLD_VERSION        EQU 03H
 NBLD_HEADER_SIZE    EQU 32
 NBLD_CODEC_LZSS12   EQU 01H
-LOADER_STACK_TOP    EQU 0F400H
+LOADER_STACK_TOP    EQU 0FB00H
 
 BASIC_RELOCATOR_START:
         DI

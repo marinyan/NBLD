@@ -59,9 +59,9 @@ New-Item -ItemType Directory -Force ./build | Out-Null
 sjasmplus --raw=build/nbld_stage2.bin tools/nbld/nbld_stage2.asm
 ```
 
-SjASMPlus 1.24.0 で生成した第2段は631バイトで、切替前の出力とバイト単位で一致する。
-SHA-256: `4d0b5d39206d29b23e2a4a419626cac2fbc84b18b54f88c4abe602e66af4863b`。
-`ORG F100H` は実行番地であり、生バイナリの先頭に F100H バイトのパディングは付かない。
+第2段は631バイトで、SjASMPlus 1.24.0とz80asmの出力はバイト単位で一致する。
+SHA-256: `02df5a4134b83c8bdc329291cfd9b238c8022acd677c0febe4da67daf27e4afd`。
+`ORG F800H` は実行番地であり、生バイナリの先頭に F800H バイトのパディングは付かない。
 
 ### 従来の z80asm
 
@@ -96,3 +96,5 @@ New-Item -ItemType Directory -Force ./build | Out-Null
 ## 共通コードの方針
 
 作品固有の設定は呼び出し側のセグメント記述に置き、共通コードへ作品名の分岐を追加しない。
+
+2026-09-09: [容量拡張と全利用先の検証](docs/capacity-2026-09-09.md)。

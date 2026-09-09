@@ -22,11 +22,11 @@ $formatVersion = 3
 $headerSize = 32
 $codecLzss12 = 1
 $basicName = "NBLD80"
-$stagingAddress = 0xC500
+$stagingAddress = 0xC800
 $relocatorStaging = 0xC8C0
 $copyBootstrapAddress = 0xF000
-$relocatorAddress = 0xF100
-$loaderStackTop = 0xF400
+$relocatorAddress = 0xF800
+$loaderStackTop = 0xFB00
 $scriptDirectory = $PSScriptRoot
 $stage2Source = Join-Path $scriptDirectory "nbld_stage2.asm"
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
@@ -280,6 +280,9 @@ foreach ($segment in $Segments) {
     if ($destination-lt 0x8000 -and ($memoryControl-band 0x02)-eq 0) {
         throw "Segment $segmentIndex targets ROM space without selecting ROM-under RAM."
     }
+    if ($destination-lt $loaderStackTop -and ($destination+$raw.Length)-gt $relocatorAddress) {
+        throw "Segment $segmentIndex overwrites the active common loader or its stack."
+    }
     [byte[]]$packed=Compress-Lzss $raw
     Assert-ByteArraysEqual $raw (Expand-Lzss $packed $raw.Length) "Segment $segmentIndex"
     [void]$preparedSegments.Add([pscustomobject]@{
@@ -319,7 +322,7 @@ $package[6]=[byte]($package.Count-band 0xFF)
 $package[7]=[byte](($package.Count-shr 8)-band 0xFF)
 [byte[]]$packageBytes=$package.ToArray()
 if (($stagingAddress+$packageBytes.Length)-gt $relocatorAddress) {
-    throw ("NBLD package reaches {0:X4}H and overlaps the F100H common loader." -f ($stagingAddress+$packageBytes.Length-1))
+    throw ("NBLD package reaches {0:X4}H and overlaps the F800H common loader." -f ($stagingAddress+$packageBytes.Length-1))
 }
 
 $packagePath=Join-Path $OutputDirectory "$OutputStem-nbld.bin"
@@ -339,13 +342,13 @@ if ($Assembler -eq 'sjasmplus') {
 }
 if ($LASTEXITCODE-ne 0) { throw "Common NBLD stage-2 assembly failed." }
 [byte[]]$relocatorBinary=[System.IO.File]::ReadAllBytes($relocatorBinaryPath)
-if (($relocatorAddress+$relocatorBinary.Length)-gt $loaderStackTop) {
-    throw "Common NBLD stage-2 overlaps its F400H stack reserve."
+if (($relocatorAddress+$relocatorBinary.Length)-gt ($loaderStackTop-64)) {
+    throw "Common NBLD stage-2 overlaps its FB00H stack reserve."
 }
 
 [byte[]]$copyBootstrap=@(
     0xF3,
-    0x31,0x00,0xF4,
+    0x31,($loaderStackTop-band 0xFF),(($loaderStackTop-shr 8)-band 0xFF),
     0x21,($relocatorStaging-band 0xFF),(($relocatorStaging-shr 8)-band 0xFF),
     0x11,($relocatorAddress-band 0xFF),(($relocatorAddress-shr 8)-band 0xFF),
     0x01,($relocatorBinary.Length-band 0xFF),(($relocatorBinary.Length-shr 8)-band 0xFF),
@@ -455,7 +458,7 @@ Add-NBasicLine $tokenLines ([UInt16]$payloadLineNumber) ([byte[]]@(0x8E,[byte][c
 [byte[]]$basicImage=New-NBasicImage $tokenLines
 $basicEnd=0x8021+$basicImage.Length
 if ($basicEnd-gt ($stagingAddress-0x280)) {
-    throw ("Tokenized BASIC reaches {0:X4}H and leaves too little work space below C500H." -f ($basicEnd-1))
+    throw ("Tokenized BASIC reaches {0:X4}H and leaves too little work space below C800H." -f ($basicEnd-1))
 }
 
 $basicSourcePath=Join-Path $OutputDirectory "$OutputStem-loader.bas"
@@ -516,9 +519,13 @@ $packedResidentBytes=($preparedSegments|ForEach-Object {$_.Packed.Length}|Measur
     EncodedPayloadBytes=$encodedPackage.Length
     TokenizedBasicBytes=$basicImage.Length
     TokenizedBasicRange=("8021H-{0:X4}H" -f ($basicEnd-1))
-    StagingRange=("C500H-{0:X4}H" -f ($stagingAddress+$packageBytes.Length-1))
+    StagingRange=("C800H-{0:X4}H" -f ($stagingAddress+$packageBytes.Length-1))
     Relocator=$relocatorBinaryPath
     RelocatorBytes=$relocatorBinary.Length
+    BasicWorkReserveBytes=640
+    BasicFreeBytes=($stagingAddress-640-$basicEnd)
+    PackageFreeBytes=($relocatorAddress-$stagingAddress-$packageBytes.Length)
+    LoaderStackReserveBytes=($loaderStackTop-$relocatorAddress-$relocatorBinary.Length)
     BasicSource=$basicSourcePath
     BasicImage=$basicImagePath
     Cmt=$cmtPath
