@@ -98,3 +98,6 @@ New-Item -ItemType Directory -Force ./build | Out-Null
 作品固有の設定は呼び出し側のセグメント記述に置き、共通コードへ作品名の分岐を追加しない。
 
 2026-09-09: [容量拡張と全利用先の検証](docs/capacity-2026-09-09.md)。
+
+初期値付きデータでローダー自身を最後に上書きする場合は、
+[最終コピー](docs/finalizer-ja.md)の -AllowLoaderOverwrite を使用できます。

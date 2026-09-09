@@ -14,7 +14,8 @@ param(
     [string]$OutputDirectory,
     [ValidateSet('sjasmplus', 'z80asm')]
     [string]$Assembler = 'sjasmplus',
-    [string]$AssemblerPath
+    [string]$AssemblerPath,
+    [switch]$AllowLoaderOverwrite
 )
 
 $ErrorActionPreference = "Stop"
@@ -280,15 +281,88 @@ foreach ($segment in $Segments) {
     if ($destination-lt 0x8000 -and ($memoryControl-band 0x02)-eq 0) {
         throw "Segment $segmentIndex targets ROM space without selecting ROM-under RAM."
     }
-    if ($destination-lt $loaderStackTop -and ($destination+$raw.Length)-gt $relocatorAddress) {
+    if (!$AllowLoaderOverwrite -and $destination-lt $loaderStackTop -and ($destination+$raw.Length)-gt $relocatorAddress) {
         throw "Segment $segmentIndex overwrites the active common loader or its stack."
     }
-    [byte[]]$packed=Compress-Lzss $raw
-    Assert-ByteArraysEqual $raw (Expand-Lzss $packed $raw.Length) "Segment $segmentIndex"
     [void]$preparedSegments.Add([pscustomobject]@{
-        Path=$path;MemoryControl=$memoryControl;Destination=$destination;Raw=$raw;Packed=$packed
+        Path=$path;MemoryControl=$memoryControl;Destination=$destination;Raw=$raw
     })
     $segmentIndex++
+}
+
+# Opt-in tail installation: use only an unoccupied gap below the decoded package.
+# No CPU stack is needed by the final copy stub after the common loader jumps to it.
+$originalEntryAddress=$EntryAddress
+$deferredBytes=0
+$finalizerAddress=$null
+if ($AllowLoaderOverwrite) {
+    $deferred=[Collections.Generic.List[object]]::new()
+    $direct=[Collections.Generic.List[object]]::new()
+    foreach ($segment in $preparedSegments) {
+        $end=$segment.Destination+$segment.Raw.Length
+        if ($segment.Destination-lt $loaderStackTop -and $end-gt $relocatorAddress) {
+            if ($segment.MemoryControl-ne 0 -and $segment.MemoryControl-ne 2) {
+                throw 'Deferred loader overwrite requires ordinary upper RAM (MemoryControl 0 or 2).'
+            }
+            # Short high-memory segments are deferred whole. Large low-start images
+            # retain their prefix, subject to the existing forward-safety scan.
+            $cut=if($segment.Destination-lt $stagingAddress){$relocatorAddress}else{$segment.Destination}
+            $prefix=$cut-$segment.Destination
+            if($prefix-gt 0) {
+                $direct.Add([pscustomobject]@{Path=$segment.Path;MemoryControl=$segment.MemoryControl;Destination=$segment.Destination;Raw=[byte[]]$segment.Raw[0..($prefix-1)]})
+            }
+            [byte[]]$tail=$segment.Raw[$prefix..($segment.Raw.Length-1)]
+            $deferred.Add([pscustomobject]@{Path=$segment.Path;MemoryControl=$segment.MemoryControl;Destination=$cut;Raw=$tail})
+            $deferredBytes+=$tail.Length
+        } else { $direct.Add($segment) }
+    }
+    if ($deferred.Count-gt 0) {
+        # Reject ambiguous overwlapping outputs rather than reorder their writes.
+        for($i=0;$i-lt $preparedSegments.Count;$i++) {
+            for($j=$i+1;$j-lt $preparedSegments.Count;$j++) {
+                $a=$preparedSegments[$i];$b=$preparedSegments[$j]
+                if($a.Destination-lt ($b.Destination+$b.Raw.Length) -and $b.Destination-lt ($a.Destination+$a.Raw.Length)) {
+                    throw 'Deferred loader overwrite requires disjoint destination ranges.'
+                }
+            }
+        }
+        $stubSize=8+15*$deferred.Count
+        $needed=$stubSize+$deferredBytes
+        $scratch=0x8000
+        foreach($segment in ($preparedSegments|Sort-Object Destination)) {
+            $end=$segment.Destination+$segment.Raw.Length
+            if($end-le $scratch){continue}
+            if($segment.Destination-ge ($scratch+$needed)){break}
+            $scratch=$end
+        }
+        if(($scratch+$needed)-gt $stagingAddress) {
+            throw 'No unused upper-RAM gap below package staging for deferred loader overwrite.'
+        }
+        $finalizerAddress=$scratch
+        $cursor=$scratch+$stubSize
+        $stub=[Collections.Generic.List[byte]]::new()
+        $stub.Add(0xF3) # DI; never CALL/PUSH/RET once the old loader stack is overwritten.
+        foreach($segment in $deferred) {
+            $stub.AddRange([byte[]]@(0x3E,$segment.MemoryControl,0xD3,0x31,0x21))
+            Add-UInt16LE $stub ([UInt16]$cursor)
+            $stub.Add(0x11);Add-UInt16LE $stub ([UInt16]$segment.Destination)
+            $stub.Add(0x01);Add-UInt16LE $stub ([UInt16]$segment.Raw.Length)
+            $stub.AddRange([byte[]]@(0xED,0xB0))
+            $direct.Add([pscustomobject]@{Path=$segment.Path;MemoryControl=0;Destination=$cursor;Raw=$segment.Raw})
+            $cursor+=$segment.Raw.Length
+        }
+        $stub.AddRange([byte[]]@(0x3E,0,0xD3,0x31,0xC3));Add-UInt16LE $stub $EntryAddress
+        if($stub.Count-ne $stubSize){throw 'Finalizer size mismatch'}
+        $direct.Add([pscustomobject]@{Path='generated finalizer';MemoryControl=0;Destination=$scratch;Raw=$stub.ToArray()})
+        $preparedSegments=$direct
+        $EntryAddress=[UInt16]$scratch
+    }
+}
+if($preparedSegments.Count-gt 255){throw 'Finalizer exceeds the 255-segment limit.'}
+foreach($segment in $preparedSegments) {
+    [byte[]]$packed=Compress-Lzss $segment.Raw
+    Assert-ByteArraysEqual $segment.Raw (Expand-Lzss $packed $segment.Raw.Length) 'Prepared segment'
+    $segment|Add-Member -NotePropertyName Packed -NotePropertyValue $packed
 }
 
 $package=[System.Collections.Generic.List[byte]]::new()
@@ -512,6 +586,9 @@ $packedResidentBytes=($preparedSegments|ForEach-Object {$_.Packed.Length}|Measur
     PayloadName=$PayloadName
     EntryAddress=("{0:X4}H" -f $EntryAddress)
     SegmentCount=$preparedSegments.Count
+    OriginalEntryAddress=("{0:X4}H" -f $originalEntryAddress)
+    DeferredBytes=$deferredBytes
+    FinalizerAddress=$finalizerAddress
     ResidentBytes=$residentBytes
     PackedResidentBytes=$packedResidentBytes
     Package=$packagePath
