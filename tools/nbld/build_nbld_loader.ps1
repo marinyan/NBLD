@@ -15,7 +15,13 @@ param(
     [ValidateSet('sjasmplus', 'z80asm')]
     [string]$Assembler = 'sjasmplus',
     [string]$AssemblerPath,
-    [switch]$AllowLoaderOverwrite
+    [switch]$AllowLoaderOverwrite,
+    [ValidateSet('Embedded','Tape')]
+    [string]$Transport = 'Embedded',
+    [ValidateSet(600,1200)]
+    [int]$PayloadBaud = 600,
+    [ValidateSet(0,2)]
+    [int]$EntryMemoryControl = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,6 +36,13 @@ $relocatorAddress = 0xF800
 $loaderStackTop = 0xFB00
 $scriptDirectory = $PSScriptRoot
 $stage2Source = Join-Path $scriptDirectory "nbld_stage2.asm"
+if ($Transport -eq 'Tape') { $relocatorAddress = 0xF500 }
+if ($Transport -eq 'Embedded' -and $PayloadBaud -ne 600) {
+    throw 'PayloadBaud 1200 requires Transport Tape; the BASIC first stage stays at 600 baud.'
+}
+if ($Transport -eq 'Embedded' -and $EntryMemoryControl -ne 0) {
+    throw 'EntryMemoryControl requires Transport Tape; legacy embedded entry mapping remains unchanged.'
+}
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 if ([string]::IsNullOrWhiteSpace($AssemblerPath)) {
     $AssemblerPath = $Assembler
@@ -351,7 +364,7 @@ if ($AllowLoaderOverwrite) {
             $direct.Add([pscustomobject]@{Path=$segment.Path;MemoryControl=0;Destination=$cursor;Raw=$segment.Raw})
             $cursor+=$segment.Raw.Length
         }
-        $stub.AddRange([byte[]]@(0x3E,0,0xD3,0x31,0xC3));Add-UInt16LE $stub $EntryAddress
+        $stub.AddRange([byte[]]@(0x3E,$EntryMemoryControl,0xD3,0x31,0xC3));Add-UInt16LE $stub $EntryAddress
         if($stub.Count-ne $stubSize){throw 'Finalizer size mismatch'}
         $direct.Add([pscustomobject]@{Path='generated finalizer';MemoryControl=0;Destination=$scratch;Raw=$stub.ToArray()})
         $preparedSegments=$direct
@@ -380,7 +393,7 @@ while ($package.Count-lt $headerSize) { [void]$package.Add(0) }
 
 foreach ($segment in $preparedSegments) {
     $packedAddress=$stagingAddress+$package.Count+8
-    if ($segment.Destination-ge 0x8000) {
+    if ($Transport -eq 'Embedded' -and $segment.Destination-ge 0x8000) {
         Assert-LzssForwardInPlaceSafe $segment.Packed $segment.Raw.Length $packedAddress $segment.Destination
     }
     [void]$package.Add([byte]$segment.MemoryControl)
@@ -395,7 +408,7 @@ if ($package.Count-gt 0xFFFF) { throw "NBLD package exceeds 65535 bytes." }
 $package[6]=[byte]($package.Count-band 0xFF)
 $package[7]=[byte](($package.Count-shr 8)-band 0xFF)
 [byte[]]$packageBytes=$package.ToArray()
-if (($stagingAddress+$packageBytes.Length)-gt $relocatorAddress) {
+if ($Transport -eq 'Embedded' -and ($stagingAddress+$packageBytes.Length)-gt $relocatorAddress) {
     throw ("NBLD package reaches {0:X4}H and overlaps the F800H common loader." -f ($stagingAddress+$packageBytes.Length-1))
 }
 
@@ -403,6 +416,18 @@ $packagePath=Join-Path $OutputDirectory "$OutputStem-nbld.bin"
 [System.IO.File]::WriteAllBytes($packagePath,$packageBytes)
 $encodedText=[Convert]::ToBase64String($packageBytes)
 [byte[]]$encodedPackage=[System.Text.Encoding]::ASCII.GetBytes($encodedText)
+if ($Transport -eq 'Tape') {
+    foreach ($segment in $preparedSegments) {
+        if ($segment.MemoryControl -notin @(0,2)) {
+            throw 'Tape transport currently supports MemoryControl 0 or 2 (ordinary upper RAM).'
+        }
+    }
+    $encodedPackage=[byte[]]@()
+    $stage2Source=Join-Path $OutputDirectory "$OutputStem-tape-stage2.generated.asm"
+    $template=[IO.File]::ReadAllText((Join-Path $scriptDirectory 'nbld_tape_stage2.asm'))
+    $baudBits=if($PayloadBaud -eq 1200){'010H'}else{'000H'}
+    [IO.File]::WriteAllText($stage2Source,$template.Replace('__NBLD_BAUD_BITS__',$baudBits),[Text.Encoding]::ASCII)
+}
 
 $relocatorBinaryPath=Join-Path $OutputDirectory "$OutputStem-basic-relocator.bin"
 $relocatorListingPath=Join-Path $OutputDirectory "$OutputStem-basic-relocator.lst"
@@ -550,6 +575,35 @@ $cmt=[System.Collections.Generic.List[byte]]::new()
 $cmt.AddRange($basicHeader.ToArray())
 $cmt.AddRange($basicBody.ToArray())
 $cmtPath=Join-Path $OutputDirectory "$OutputStem-basic.cmt"
+
+function Get-TapeCrc([byte[]]$Bytes) {
+    $crc=0xFFFF
+    foreach($value in $Bytes) {
+        $crc=$crc -bxor ([int]$value -shl 8)
+        for($bit=0;$bit -lt 8;$bit++) {
+            $crc=if($crc -band 0x8000){(($crc -shl 1) -bxor 0x1021) -band 0xFFFF}else{($crc -shl 1) -band 0xFFFF}
+        }
+    }
+    return [UInt16]$crc
+}
+$tapeBody=[Collections.Generic.List[byte]]::new()
+if($Transport -eq 'Tape') {
+    $tapeBody.AddRange([byte[]]@(0x4E,0x42,0x4C,0x44,0x54,1,0xA5,0x5A))
+    [byte[]]$headerBytes=@($packageBytes[0..31])+[byte]$EntryMemoryControl
+    $tapeBody.AddRange($headerBytes)
+    Add-UInt16LE $tapeBody (Get-TapeCrc $headerBytes)
+    $packageOffset=32
+    foreach($segment in $preparedSegments) {
+        [byte[]]$descriptor=$packageBytes[$packageOffset..($packageOffset+7)]
+        $tapeBody.AddRange($descriptor)
+        Add-UInt16LE $tapeBody (Get-TapeCrc $descriptor)
+        $tapeBody.AddRange([byte[]]$segment.Packed)
+        Add-UInt16LE $tapeBody (Get-TapeCrc $segment.Packed)
+        $packageOffset+=8+$segment.Packed.Length
+    }
+    $cmt.AddRange($tapeBody.ToArray())
+    [IO.File]::WriteAllBytes((Join-Path $OutputDirectory "$OutputStem-tape-body.bin"),$tapeBody.ToArray())
+}
 [System.IO.File]::WriteAllBytes($cmtPath,$cmt.ToArray())
 
 $ticksPerByte=[UInt16]88
@@ -572,16 +626,72 @@ $currentTick+=6240
 Add-TimedTag $t88 0x0102 $currentTick 12000
 $currentTick+=12000
 Add-TimedTag $t88 0x0100 $currentTick 4800
+$currentTick+=4800
+if($Transport -eq 'Tape') {
+    # CLOAD stops the motor. RUN starts it only once the receiver is ready.
+    Add-TimedTag $t88 0x0103 $currentTick 9600
+    $currentTick+=9600
+    $payloadTicks=if($PayloadBaud -eq 1200){44}else{88}
+    $payloadType=if($PayloadBaud -eq 1200){0x01CC}else{0x00CC}
+    Add-T88DataTag $t88 $tapeBody.ToArray() ([ref]$currentTick) $payloadTicks $payloadType
+    Add-TimedTag $t88 0x0103 $currentTick 4800
+    $currentTick+=4800
+}
 Add-UInt16LE $t88 0
 Add-UInt16LE $t88 0
 $t88Path=Join-Path $OutputDirectory "$OutputStem-basic.t88"
 [System.IO.File]::WriteAllBytes($t88Path,$t88.ToArray())
+
+# Optional boot path for MON users: the same receiver and streamed body, not a
+# separate game-specific implementation. MON L loads only this small 8800H stub.
+$monitorTape=$null
+$monitorCmt=$null
+$monitorTick=0
+if($Transport -eq 'Tape') {
+    [byte[]]$monitorStub=$copyBootstrap.Clone()
+    $monitorStub[5]=0x12;$monitorStub[6]=0x88
+    [byte[]]$monitorImage=@($monitorStub)+@($relocatorBinary)
+    $monitorData=[Collections.Generic.List[byte]]::new()
+    $monitorData.AddRange([byte[]]@(0x3A,0x88,0,0x78))
+    for($offset=0;$offset -lt $monitorImage.Length;$offset+=255) {
+        $count=[Math]::Min(255,$monitorImage.Length-$offset)
+        $monitorData.Add(0x3A);$monitorData.Add([byte]$count)
+        $sum=$count
+        for($i=0;$i -lt $count;$i++){$value=$monitorImage[$offset+$i];$monitorData.Add($value);$sum+=$value}
+        $monitorData.Add([byte]((-$sum)-band 255))
+    }
+    $monitorData.AddRange([byte[]]@(0x3A,0,0))
+    $monitorT88=[Collections.Generic.List[byte]]::new()
+    $monitorT88.AddRange([Text.Encoding]::ASCII.GetBytes("PC-8801 Tape Image(T88)`0"))
+    Add-UInt16LE $monitorT88 1;Add-UInt16LE $monitorT88 2;Add-UInt16LE $monitorT88 0x100
+    $monitorTick=[UInt32]0
+    Add-TimedTag $monitorT88 0x103 $monitorTick 9600;$monitorTick+=9600
+    Add-T88DataTag $monitorT88 $monitorData.ToArray() ([ref]$monitorTick)
+    Add-TimedTag $monitorT88 0x103 $monitorTick 9600;$monitorTick+=9600
+    Add-T88DataTag $monitorT88 $tapeBody.ToArray() ([ref]$monitorTick) $payloadTicks $payloadType
+    Add-TimedTag $monitorT88 0x103 $monitorTick 4800;$monitorTick+=4800
+    Add-UInt16LE $monitorT88 0;Add-UInt16LE $monitorT88 0
+    $monitorData.AddRange($tapeBody.ToArray())
+    $monitorTape=Join-Path $OutputDirectory "$OutputStem-monitor.t88"
+    $monitorCmt=Join-Path $OutputDirectory "$OutputStem-monitor.cmt"
+    [IO.File]::WriteAllBytes($monitorTape,$monitorT88.ToArray())
+    [IO.File]::WriteAllBytes($monitorCmt,$monitorData.ToArray())
+}
 
 $residentBytes=($preparedSegments|ForEach-Object {$_.Raw.Length}|Measure-Object -Sum).Sum
 $packedResidentBytes=($preparedSegments|ForEach-Object {$_.Packed.Length}|Measure-Object -Sum).Sum
 
 [pscustomobject]@{
     Format="NBLD v3"
+    Transport=$Transport
+    BootstrapBaud=600
+    PayloadBaud=$PayloadBaud
+    EntryMemoryControl=$EntryMemoryControl
+    TapeSeconds=($currentTick/4800.0)
+    MonitorTape=$monitorTape
+    MonitorCmt=$monitorCmt
+    MonitorTapeSeconds=if($Transport -eq 'Tape'){$monitorTick/4800.0}else{$null}
+    TapeBodyBytes=$tapeBody.Count
     BasicName=$basicName
     PayloadName=$PayloadName
     EntryAddress=("{0:X4}H" -f $EntryAddress)
@@ -596,12 +706,12 @@ $packedResidentBytes=($preparedSegments|ForEach-Object {$_.Packed.Length}|Measur
     EncodedPayloadBytes=$encodedPackage.Length
     TokenizedBasicBytes=$basicImage.Length
     TokenizedBasicRange=("8021H-{0:X4}H" -f ($basicEnd-1))
-    StagingRange=("C800H-{0:X4}H" -f ($stagingAddress+$packageBytes.Length-1))
+    StagingRange=if($Transport -eq 'Tape'){'none (streaming)'}else{("C800H-{0:X4}H" -f ($stagingAddress+$packageBytes.Length-1))}
     Relocator=$relocatorBinaryPath
     RelocatorBytes=$relocatorBinary.Length
     BasicWorkReserveBytes=640
     BasicFreeBytes=($stagingAddress-640-$basicEnd)
-    PackageFreeBytes=($relocatorAddress-$stagingAddress-$packageBytes.Length)
+    PackageFreeBytes=if($Transport -eq 'Tape'){$null}else{($relocatorAddress-$stagingAddress-$packageBytes.Length)}
     LoaderStackReserveBytes=($loaderStackTop-$relocatorAddress-$relocatorBinary.Length)
     BasicSource=$basicSourcePath
     BasicImage=$basicImagePath

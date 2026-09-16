@@ -6,6 +6,11 @@ Base64 化した NBLD v3 パッケージを復元し、LZSS12 圧縮された各
 
 ## 構成
 
+後続本体を600/1200 baudで受信しながら展開するには
+`-Transport Tape -PayloadBaud 1200` を追加する。
+初段は600 baud、CSAVE名は共通の `NBLD80` のまま。
+本体のBase64と全量受信バッファを不要にする。[方式・制約・検証](docs/streaming-tape-ja.md)。
+
 - `tools/nbld/build_nbld_loader.ps1`: パッケージ、N-BASIC、CMT、T88 の生成
 - `tools/nbld/nbld_stage2.asm`: 共通 Z80 第2段
 - [NBLD v3 形式仕様](docs/nbld-v3-ja.md): メモリ配置・パッケージ形式・共有方針
