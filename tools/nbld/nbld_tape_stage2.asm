@@ -10,11 +10,15 @@ LOADER_START    EQU 0F500H
 TAPE_START:
         DI
         LD SP,STACK_TOP
+        XOR A
+        LD (PROGRESS_ACTIVE),A
         LD A,(0EA66H)
         AND 0C7H
         OR __NBLD_BAUD_BITS__
+        OR 1                  ; 80 columns, including MON / WIDTH 40 entry.
         LD (CONTROL30),A
         OUT (030H),A
+        CALL PROGRESS_DISPLAY
         XOR A
         OUT (021H),A
         OUT (021H),A
@@ -89,6 +93,8 @@ HEADER_RESERVED_LOOP:
         AND 0FDH
         JP NZ,ERROR_RANGE
 
+        CALL PROGRESS_INIT
+
 NEXT_SEGMENT:
         LD HL,DESCRIPTOR
         LD B,8
@@ -124,6 +130,7 @@ ROM_RANGE_OK:
 END_NO_WRAP:
         DEC HL
 DEST_CHECK_PROTECTED:
+        CALL PROGRESS_PROTECT
         ; Last output address < F500H, or first >= FB00H.
         LD BC,LOADER_START
         OR A
@@ -237,6 +244,7 @@ SEGMENT_DONE:
         LD A,H
         OR L
         JP NZ,ERROR_FORMAT
+        CALL PROGRESS_FINISH
         CALL STOP_TAPE
         LD A,(HEADER+32)
         OUT (031H),A
@@ -284,6 +292,7 @@ VERIFY_CRC:
 ; CRC-16/CCITT-FALSE; A and BC/DE/HL/IX/IY are preserved.
 READ_CRC:
         CALL READ_RAW
+        CALL PROGRESS_BYTE
         PUSH AF
         PUSH BC
         PUSH DE
@@ -370,6 +379,160 @@ TAPE_ERROR:
 ERROR_HALT:
         HALT
         JR ERROR_HALT
+
+; Package bytes after the fixed header; transport CRC/sync are excluded.
+; Fix the DMA origin as well as the 40/80-column latch: BASIC may scroll
+; by changing its DMA address. This runs before the cassette motor starts.
+PROGRESS_DISPLAY:
+        XOR A
+        OUT (051H),A
+        LD A,080H
+        OUT (068H),A
+        XOR A
+        OUT (064H),A
+        LD A,0F3H
+        OUT (064H),A
+        LD A,0B7H
+        OUT (065H),A
+        LD A,08BH
+        OUT (065H),A
+        LD HL,PROGRESS_CRTC
+        LD B,5
+PROGRESS_CRTC_LOOP:
+        LD A,(HL)
+        OUT (050H),A
+        INC HL
+        DJNZ PROGRESS_CRTC_LOOP
+        LD A,080H
+        OUT (051H),A
+        XOR A
+        OUT (050H),A
+        OUT (050H),A
+        LD A,043H
+        OUT (051H),A
+        LD A,0C4H
+        OUT (068H),A
+        LD A,020H
+        OUT (051H),A
+        RET
+PROGRESS_CRTC: DB 0CEH,098H,067H,0DEH,053H
+
+PROGRESS_INIT:
+        LD HL,0F300H
+        LD DE,0F301H
+        LD BC,79
+        LD (HL),' '
+        LDIR
+        LD HL,0F350H
+        LD DE,0F351H
+        LD BC,39
+        LD (HL),080H
+        LDIR
+        LD HL,0E800H
+        LD (0F350H),HL
+        LD HL,0
+        LD (PROGRESS_BYTES),HL
+        LD HL,PROGRESS_TEXT
+        LD DE,0F300H
+        LD BC,PROGRESS_TEXT_END-PROGRESS_TEXT
+        LDIR
+        LD HL,(HEADER+6)
+        LD BC,32
+        OR A
+        SBC HL,BC
+        LD A,L
+        LD L,H
+        LD H,0
+        OR A
+        JR Z,PROGRESS_TOTAL
+        INC HL
+PROGRESS_TOTAL:
+        LD (PROGRESS_BLOCKS),HL
+        LD DE,0F30FH
+        CALL PROGRESS_DECIMAL
+        LD A,1
+        LD (PROGRESS_ACTIVE),A
+        RET
+; HL=last destination, DE=first. Stop before payload overwrites the UI.
+PROGRESS_PROTECT:
+        PUSH AF
+        PUSH BC
+        PUSH HL
+        LD BC,0F300H
+        OR A
+        SBC HL,BC
+        JR C,PROGRESS_SAFE
+        LD HL,0F311H
+        OR A
+        SBC HL,DE
+        JR C,PROGRESS_SAFE
+        XOR A
+        LD (PROGRESS_ACTIVE),A
+PROGRESS_SAFE:
+        POP HL
+        POP BC
+        POP AF
+        RET
+; Preserve all decoder registers, including the received byte in A.
+PROGRESS_BYTE:
+        PUSH AF
+        LD A,(PROGRESS_ACTIVE)
+        OR A
+        JR Z,PROGRESS_BYTE_DONE
+        PUSH HL
+        LD HL,(PROGRESS_BYTES)
+        INC HL
+        LD (PROGRESS_BYTES),HL
+        LD A,L
+        OR A
+        JR NZ,PROGRESS_BYTE_RESTORE
+        LD L,H
+        LD H,0
+        CALL PROGRESS_DRAW
+PROGRESS_BYTE_RESTORE:
+        POP HL
+PROGRESS_BYTE_DONE:
+        POP AF
+        RET
+PROGRESS_FINISH:
+        LD A,(PROGRESS_ACTIVE)
+        OR A
+        RET Z
+        LD HL,(PROGRESS_BLOCKS)
+PROGRESS_DRAW:
+        PUSH BC
+        PUSH DE
+        LD DE,0F30BH
+        CALL PROGRESS_DECIMAL
+        POP DE
+        POP BC
+        RET
+; HL=0..256, DE=three text cells. No ROM or interrupts required.
+PROGRESS_DECIMAL:
+        LD BC,100
+        CALL PROGRESS_DIGIT
+        LD BC,10
+        CALL PROGRESS_DIGIT
+        LD A,L
+        ADD A,'0'
+        LD (DE),A
+        RET
+PROGRESS_DIGIT:
+        LD A,'0'-1
+PROGRESS_SUBTRACT:
+        INC A
+        OR A
+        SBC HL,BC
+        JR NC,PROGRESS_SUBTRACT
+        ADD HL,BC
+        LD (DE),A
+        INC DE
+        RET
+PROGRESS_TEXT: DB "LOAD BLOCK 000/000"
+PROGRESS_TEXT_END:
+PROGRESS_ACTIVE: DB 0
+PROGRESS_BYTES: DW 0
+PROGRESS_BLOCKS: DW 0
 
 TAPE_MAGIC:     DB "NBLDT",1,0A5H,05AH
 PACKAGE_MAGIC:  DB "NBLD",3,32

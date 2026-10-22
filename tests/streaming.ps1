@@ -16,7 +16,7 @@ function Read-Ram($Address,$Length) {
     $r=& $ctl memory @options -Address $Address -Length $Length
     return ,([Convert]::FromHexString($r.hex))
 }
-function Boot($Result,$Tape='') {
+function Boot($Result,$Tape='',$ObserveProgress=$false) {
     if(!$Tape){$Tape=$Result.Tape}
     & $ctl reset @options | Out-Null
     & $ctl run @options -Frames 180 | Out-Null
@@ -26,6 +26,20 @@ function Boot($Result,$Tape='') {
     $basic=[IO.File]::ReadAllBytes($Result.BasicImage)
     if([Convert]::ToHexString((Read-Ram 0x8021 $basic.Length)) -ne [Convert]::ToHexString($basic)){throw 'Streaming CLOAD mismatch'}
     & $typer @options -Line 'run' | Out-Null
+    if($ObserveProgress) {
+        $seen=[Collections.Generic.HashSet[int]]::new()
+        $total=[int][Math]::Ceiling(($Result.PackageBytes-32)/256.0)
+        for($frame=0;$frame -lt 12000;$frame+=10) {
+            & $ctl run @options -Frames 10 | Out-Null
+            $line=[Text.Encoding]::ASCII.GetString((Read-Ram 0xF300 18))
+            if($line -match '^LOAD BLOCK (\d{3})/(\d{3})$') {
+                if([int]$Matches[2] -ne $total){throw "Wrong total: $line"}
+                [void]$seen.Add([int]$Matches[1])
+            }
+            if((Read-Ram 0xF504 1)[0] -eq 3){break}
+        }
+        if(!@($seen | Where-Object {$_ -gt 0 -and $_ -lt $total}).Count){throw 'No intermediate progress observed'}
+    }
     & $ctl run @options -Frames 12000 | Out-Null
 }
 function Build-Case($Name,$Segments,$Entry=0x9000,$Baud=1200,$Overwrite=$false,$EntryMode=0) {
@@ -152,5 +166,27 @@ foreach($case in $cases) {
     if($state[0] -ne $case.code -or $state[1] -ne 255){throw "Corrupt case $($case.name): got error/state $state"}
     $reports.Add(@{case=$case.name;passed=$true;error=$state[0]})
 }
+# Progress counts validated package bytes (descriptors + compressed payload).
+# A final partial block must reach the displayed total, and UI writes must
+# cease before a destination overlaps F300..F311, including either edge.
+foreach($destination in @(0x9200,0xF2FF,0xF300,0xF311,0xF312)) {
+    [byte[]]$bytes=New-Object byte[] $(if($destination -eq 0x9200){1024}else{64})
+    $random=[Random]::new(8001)
+    $random.NextBytes($bytes)
+    $segment=Make-Segment ("progress-{0:X4}" -f $destination) $bytes $destination
+    $result=Build-Case ("progress-{0:X4}" -f $destination) @($small,$segment)
+    Boot $result -ObserveProgress:($destination -eq 0x9200)
+    Check-Segment $small
+    Check-Segment $segment
+    Check-Pc 0x9001
+    if($destination -in @(0x9200,0xF312)) {
+        $total=[int][Math]::Ceiling(($result.PackageBytes-32)/256.0)
+        $expected='LOAD BLOCK {0:000}/{0:000}' -f $total
+        $actual=[Text.Encoding]::ASCII.GetString((Read-Ram 0xF300 18))
+        if($actual -ne $expected){throw "Progress mismatch: $actual / $expected"}
+    }
+    $reports.Add(@{case=("progress-{0:X4}" -f $destination);passed=$true})
+}
+
 $reports | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $out 'report.json')
 $reports | ForEach-Object { [pscustomobject]$_ }
