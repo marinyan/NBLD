@@ -130,7 +130,6 @@ ROM_RANGE_OK:
 END_NO_WRAP:
         DEC HL
 DEST_CHECK_PROTECTED:
-        CALL PROGRESS_PROTECT
         ; Last output address < F500H, or first >= FB00H.
         LD BC,LOADER_START
         OR A
@@ -373,14 +372,15 @@ TAPE_ERROR:
         LD A,0FFH
         LD (TAPE_STATE),A
         LD HL,ERROR_TEXT
-        LD DE,0F300H
+        LD DE,0FA00H
         LD BC,ERROR_TEXT_END-ERROR_TEXT
         LDIR
 ERROR_HALT:
         HALT
         JR ERROR_HALT
 
-; Package bytes after the fixed header; transport CRC/sync are excluded.
+; Display row FA00..FA77 lives inside the existing protected loader region.
+; Code must end before FA00; stack has FA78..FAFF (136 bytes).
 ; Fix the DMA origin as well as the 40/80-column latch: BASIC may scroll
 ; by changing its DMA address. This runs before the cassette motor starts.
 PROGRESS_DISPLAY:
@@ -390,7 +390,7 @@ PROGRESS_DISPLAY:
         OUT (068H),A
         XOR A
         OUT (064H),A
-        LD A,0F3H
+        LD A,0FAH
         OUT (064H),A
         LD A,0B7H
         OUT (065H),A
@@ -414,26 +414,26 @@ PROGRESS_CRTC_LOOP:
         OUT (068H),A
         LD A,020H
         OUT (051H),A
-        RET
-PROGRESS_CRTC: DB 0CEH,098H,067H,0DEH,053H
-
-PROGRESS_INIT:
-        LD HL,0F300H
-        LD DE,0F301H
+        LD HL,0FA00H
+        LD DE,0FA01H
         LD BC,79
         LD (HL),' '
         LDIR
-        LD HL,0F350H
-        LD DE,0F351H
+        LD HL,0FA50H
+        LD DE,0FA51H
         LD BC,39
         LD (HL),080H
         LDIR
         LD HL,0E800H
-        LD (0F350H),HL
+        LD (0FA50H),HL
+        RET
+PROGRESS_CRTC: DB 0CEH,098H,067H,0DEH,053H
+
+PROGRESS_INIT:
         LD HL,0
         LD (PROGRESS_BYTES),HL
         LD HL,PROGRESS_TEXT
-        LD DE,0F300H
+        LD DE,0FA00H
         LD BC,PROGRESS_TEXT_END-PROGRESS_TEXT
         LDIR
         LD HL,(HEADER+6)
@@ -448,30 +448,10 @@ PROGRESS_INIT:
         INC HL
 PROGRESS_TOTAL:
         LD (PROGRESS_BLOCKS),HL
-        LD DE,0F30FH
+        LD DE,0FA0FH
         CALL PROGRESS_DECIMAL
         LD A,1
         LD (PROGRESS_ACTIVE),A
-        RET
-; HL=last destination, DE=first. Stop before payload overwrites the UI.
-PROGRESS_PROTECT:
-        PUSH AF
-        PUSH BC
-        PUSH HL
-        LD BC,0F300H
-        OR A
-        SBC HL,BC
-        JR C,PROGRESS_SAFE
-        LD HL,0F311H
-        OR A
-        SBC HL,DE
-        JR C,PROGRESS_SAFE
-        XOR A
-        LD (PROGRESS_ACTIVE),A
-PROGRESS_SAFE:
-        POP HL
-        POP BC
-        POP AF
         RET
 ; Preserve all decoder registers, including the received byte in A.
 PROGRESS_BYTE:
@@ -502,7 +482,7 @@ PROGRESS_FINISH:
 PROGRESS_DRAW:
         PUSH BC
         PUSH DE
-        LD DE,0F30BH
+        LD DE,0FA0BH
         CALL PROGRESS_DECIMAL
         POP DE
         POP BC

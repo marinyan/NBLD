@@ -441,8 +441,9 @@ if ($Assembler -eq 'sjasmplus') {
 }
 if ($LASTEXITCODE-ne 0) { throw "Common NBLD stage-2 assembly failed." }
 [byte[]]$relocatorBinary=[System.IO.File]::ReadAllBytes($relocatorBinaryPath)
-if (($relocatorAddress+$relocatorBinary.Length)-gt ($loaderStackTop-64)) {
-    throw "Common NBLD stage-2 overlaps its FB00H stack reserve."
+$codeLimit=if($Transport -eq 'Tape'){0xFA00}else{$loaderStackTop-64}
+if (($relocatorAddress+$relocatorBinary.Length)-gt $codeLimit) {
+    throw "Common NBLD stage-2 overlaps its display or FB00H stack reserve."
 }
 
 [byte[]]$copyBootstrap=@(
@@ -712,7 +713,7 @@ $packedResidentBytes=($preparedSegments|ForEach-Object {$_.Packed.Length}|Measur
     BasicWorkReserveBytes=640
     BasicFreeBytes=($stagingAddress-640-$basicEnd)
     PackageFreeBytes=if($Transport -eq 'Tape'){$null}else{($relocatorAddress-$stagingAddress-$packageBytes.Length)}
-    LoaderStackReserveBytes=($loaderStackTop-$relocatorAddress-$relocatorBinary.Length)
+    LoaderStackReserveBytes=$(if($Transport -eq 'Tape'){$loaderStackTop-0xFA78}else{$loaderStackTop-$relocatorAddress-$relocatorBinary.Length})
     BasicSource=$basicSourcePath
     BasicImage=$basicImagePath
     Cmt=$cmtPath

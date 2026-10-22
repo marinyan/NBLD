@@ -31,7 +31,7 @@ function Boot($Result,$Tape='',$ObserveProgress=$false) {
         $total=[int][Math]::Ceiling(($Result.PackageBytes-32)/256.0)
         for($frame=0;$frame -lt 12000;$frame+=10) {
             & $ctl run @options -Frames 10 | Out-Null
-            $line=[Text.Encoding]::ASCII.GetString((Read-Ram 0xF300 18))
+            $line=[Text.Encoding]::ASCII.GetString((Read-Ram 0xFA00 18))
             if($line -match '^LOAD BLOCK (\d{3})/(\d{3})$') {
                 if([int]$Matches[2] -ne $total){throw "Wrong total: $line"}
                 [void]$seen.Add([int]$Matches[1])
@@ -168,7 +168,7 @@ foreach($case in $cases) {
 }
 # Progress counts validated package bytes (descriptors + compressed payload).
 # A final partial block must reach the displayed total, and UI writes must
-# cease before a destination overlaps F300..F311, including either edge.
+# never touch the payload at F300..F311, including either edge.
 foreach($destination in @(0x9200,0xF2FF,0xF300,0xF311,0xF312)) {
     [byte[]]$bytes=New-Object byte[] $(if($destination -eq 0x9200){1024}else{64})
     $random=[Random]::new(8001)
@@ -179,12 +179,10 @@ foreach($destination in @(0x9200,0xF2FF,0xF300,0xF311,0xF312)) {
     Check-Segment $small
     Check-Segment $segment
     Check-Pc 0x9001
-    if($destination -in @(0x9200,0xF312)) {
-        $total=[int][Math]::Ceiling(($result.PackageBytes-32)/256.0)
-        $expected='LOAD BLOCK {0:000}/{0:000}' -f $total
-        $actual=[Text.Encoding]::ASCII.GetString((Read-Ram 0xF300 18))
-        if($actual -ne $expected){throw "Progress mismatch: $actual / $expected"}
-    }
+    $total=[int][Math]::Ceiling(($result.PackageBytes-32)/256.0)
+    $expected='LOAD BLOCK {0:000}/{0:000}' -f $total
+    $actual=[Text.Encoding]::ASCII.GetString((Read-Ram 0xFA00 18))
+    if($actual -ne $expected){throw "Progress mismatch: $actual / $expected"}
     $reports.Add(@{case=("progress-{0:X4}" -f $destination);passed=$true})
 }
 
